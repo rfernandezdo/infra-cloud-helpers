@@ -133,82 +133,57 @@ if (-not (Get-AzContext)) {
 # Selecciona la suscripción
 Set-AzContext -SubscriptionId $SubscriptionId | Out-Null
 
-# Obtiene las asignaciones de políticas en el management group destino (simulación de herencia)
+# Obtiene las asignaciones de políticas que aplicarían a la suscripción desde el MG destino
 Write-Host "`n=== FASE 1: OBTENIENDO ASIGNACIONES DE POLÍTICAS ===" -ForegroundColor Cyan
-Write-Host "Buscando asignaciones en management group destino y superiores..." -ForegroundColor Cyan
+Write-Host "Simulando la suscripción bajo el management group destino..." -ForegroundColor Cyan
 
-# Función para obtener todas las asignaciones heredadas (del MG destino y sus ancestros)
-function Get-InheritedPolicyAssignments {
-    param([string]$ManagementGroupName)
-    
-    $allAssignments = @()
-    $uniqueIds = @{}
-    $currentMG = $ManagementGroupName
-    $level = 0
-    $mgHierarchy = @()
-    
-    # Primero construye la jerarquía completa
-    Write-Host "  Construyendo jerarquía de management groups..." -ForegroundColor Gray
-    $tempMG = $ManagementGroupName
-    while ($tempMG) {
-        $mgHierarchy += $tempMG
-        $mgInfo = Get-AzManagementGroup -GroupId $tempMG -Expand -ErrorAction SilentlyContinue
-        if ($mgInfo -and $mgInfo.ParentId) {
-            $tempMG = $mgInfo.ParentId.Split('/')[-1]
-        } else {
-            $tempMG = $null
-        }
+# Primero, obtenemos TODAS las asignaciones que la suscripción puede ver actualmente
+Write-Host "`n  Obteniendo todas las asignaciones visibles desde la suscripción..." -ForegroundColor Gray
+$currentSubScope = "/subscriptions/$SubscriptionId"
+$currentAssignments = @(Get-AzPolicyAssignment -ErrorAction SilentlyContinue)
+Write-Host "  Total de asignaciones actuales visibles: $($currentAssignments.Count)" -ForegroundColor DarkGray
+
+# Ahora construimos la jerarquía del MG destino
+Write-Host "`n  Construyendo jerarquía del management group destino..." -ForegroundColor Gray
+$mgHierarchy = @()
+$tempMG = $TargetMG
+
+while ($tempMG) {
+    $mgHierarchy += $tempMG
+    $mgInfo = Get-AzManagementGroup -GroupId $tempMG -Expand -ErrorAction SilentlyContinue
+    if ($mgInfo -and $mgInfo.ParentId) {
+        $tempMG = $mgInfo.ParentId.Split('/')[-1]
+    } else {
+        $tempMG = $null
     }
-    
-    Write-Host "  Jerarquía: $($mgHierarchy -join ' <- ')`n" -ForegroundColor DarkGray
-    
-    # Ahora obtiene las asignaciones de cada nivel (desde el destino hasta la raíz)
-    foreach ($mg in $mgHierarchy) {
-        $level++
-        Write-Host "  [$level/$($mgHierarchy.Count)] Consultando management group: $mg..." -ForegroundColor Gray
-        
-        # Obtiene TODAS las asignaciones visibles y filtra por scope
-        $mgScope = "/providers/Microsoft.Management/managementGroups/$mg"
-        
-        try {
-            # Obtiene todas las asignaciones y filtra las que pertenecen a este MG
-            $allVisible = @(Get-AzPolicyAssignment -ErrorAction SilentlyContinue)
-            Write-Host "      Total de asignaciones visibles: $($allVisible.Count)" -ForegroundColor DarkGray
-            
-            # Filtra por scope de este MG específico
-            $assignments = @($allVisible | Where-Object { 
-                $_.Properties.Scope -eq $mgScope
-            })
-            
-            if ($assignments.Count -gt 0) {
-                Write-Host "      ✓ Encontradas $($assignments.Count) asignaciones en este scope" -ForegroundColor Green
-                
-                # Agrega solo las que no están ya en la lista (por ResourceId)
-                foreach ($assignment in $assignments) {
-                    if ($assignment -and $assignment.ResourceId) {
-                        if (-not $uniqueIds.ContainsKey($assignment.ResourceId)) {
-                            $allAssignments += $assignment
-                            $uniqueIds[$assignment.ResourceId] = $true
-                            Write-Host "        + $($assignment.Properties.DisplayName)" -ForegroundColor DarkGray
-                        }
-                    }
-                }
-            } else {
-                Write-Host "      - Sin asignaciones en este scope" -ForegroundColor Gray
-            }
-        } catch {
-            Write-Host "      ⚠ Error al consultar: $($_.Exception.Message)" -ForegroundColor Yellow
-        }
-    }
-    
-    Write-Host "`n  ✓ Total de asignaciones únicas recopiladas: $($allAssignments.Count)" -ForegroundColor Green
-    
-    return $allAssignments
 }
 
-$policyAssignments = Get-InheritedPolicyAssignments -ManagementGroupName $TargetMG
+Write-Host "  Jerarquía del destino: $($mgHierarchy -join ' <- ')" -ForegroundColor Cyan
 
-Write-Host "`nTotal de asignaciones encontradas: $($policyAssignments.Count)" -ForegroundColor Cyan
+# Filtramos las asignaciones que aplicarían desde esta jerarquía
+Write-Host "`n  Filtrando asignaciones que aplicarían desde la jerarquía destino..." -ForegroundColor Gray
+$policyAssignments = @()
+$uniqueIds = @{}
+
+foreach ($mg in $mgHierarchy) {
+    $mgScope = "/providers/Microsoft.Management/managementGroups/$mg"
+    Write-Host "    Buscando asignaciones en scope: $mgScope" -ForegroundColor DarkGray
+    
+    $mgAssignments = @($currentAssignments | Where-Object { 
+        $_.Properties.Scope -eq $mgScope
+    })
+    
+    Write-Host "      Encontradas: $($mgAssignments.Count)" -ForegroundColor DarkGray
+    
+    foreach ($assignment in $mgAssignments) {
+        if ($assignment -and $assignment.ResourceId -and -not $uniqueIds.ContainsKey($assignment.ResourceId)) {
+            $policyAssignments += $assignment
+            $uniqueIds[$assignment.ResourceId] = $true
+        }
+    }
+}
+
+Write-Host "`n✓ Total de asignaciones que aplicarían: $($policyAssignments.Count)" -ForegroundColor Green
 
 if (-not $policyAssignments -or $policyAssignments.Count -eq 0) {
     Write-Host "No se encontraron asignaciones de políticas en el management group destino." -ForegroundColor Yellow

@@ -160,25 +160,45 @@ while ($tempMG) {
 
 Write-Host "  Jerarquía del destino: $($mgHierarchy -join ' <- ')" -ForegroundColor Cyan
 
+# Primero, veamos qué scopes tienen las asignaciones actuales
+Write-Host "`n  DEBUG: Mostrando scopes de las primeras 10 asignaciones:" -ForegroundColor Yellow
+$currentAssignments | Select-Object -First 10 | ForEach-Object {
+    Write-Host "    - $($_.Properties.DisplayName): $($_.Properties.Scope)" -ForegroundColor DarkGray
+}
+
 # Filtramos las asignaciones que aplicarían desde esta jerarquía
 Write-Host "`n  Filtrando asignaciones que aplicarían desde la jerarquía destino..." -ForegroundColor Gray
 $policyAssignments = @()
 $uniqueIds = @{}
 
 foreach ($mg in $mgHierarchy) {
-    $mgScope = "/providers/Microsoft.Management/managementGroups/$mg"
-    Write-Host "    Buscando asignaciones en scope: $mgScope" -ForegroundColor DarkGray
+    # Probamos diferentes formatos de scope
+    $mgScopeFormats = @(
+        "/providers/Microsoft.Management/managementGroups/$mg",
+        "/providers/Microsoft.Management/ManagementGroups/$mg",
+        "Microsoft.Management/managementGroups/$mg",
+        $mg
+    )
     
-    $mgAssignments = @($currentAssignments | Where-Object { 
-        $_.Properties.Scope -eq $mgScope
-    })
+    Write-Host "`n    Buscando asignaciones para MG: $mg" -ForegroundColor DarkGray
     
-    Write-Host "      Encontradas: $($mgAssignments.Count)" -ForegroundColor DarkGray
-    
-    foreach ($assignment in $mgAssignments) {
-        if ($assignment -and $assignment.ResourceId -and -not $uniqueIds.ContainsKey($assignment.ResourceId)) {
-            $policyAssignments += $assignment
-            $uniqueIds[$assignment.ResourceId] = $true
+    foreach ($scopeFormat in $mgScopeFormats) {
+        $mgAssignments = @($currentAssignments | Where-Object { 
+            $_.Properties.Scope -eq $scopeFormat -or
+            $_.Properties.Scope -like "*$mg*"
+        })
+        
+        if ($mgAssignments.Count -gt 0) {
+            Write-Host "      ✓ Encontradas $($mgAssignments.Count) con formato/patrón: $scopeFormat" -ForegroundColor Green
+            
+            foreach ($assignment in $mgAssignments) {
+                if ($assignment -and $assignment.ResourceId -and -not $uniqueIds.ContainsKey($assignment.ResourceId)) {
+                    $policyAssignments += $assignment
+                    $uniqueIds[$assignment.ResourceId] = $true
+                    Write-Host "        + $($assignment.Properties.DisplayName)" -ForegroundColor DarkGray
+                }
+            }
+            break
         }
     }
 }

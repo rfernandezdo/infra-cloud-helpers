@@ -1,13 +1,11 @@
+
 <#
 .SYNOPSIS
-    Verifica incumplimientos de políticas Deny al mover una suscripción entre management groups en Azure.
+    Verifica el cumplimiento de políticas Deny al mover una suscripción entre management groups en Azure.
+
 .DESCRIPTION
-    El script recibe por línea de comandos o de forma interactiva:
-    - ID de suscripción
-    - Management group origen
-    - Management group destino
-    - Modo de salida: incumplimientos, cumplimientos, o todos
-    Devuelve los recursos de la suscripción que incumplen (o cumplen) las policies/iniciativas Deny del management group destino.
+    Este script comprueba los recursos de una suscripción frente a las políticas/iniciativas con efecto Deny asignadas en el management group destino. Permite identificar incumplimientos antes de realizar la migración.
+
 .PARAMETER SubscriptionId
     ID de la suscripción a mover.
 .PARAMETER SourceMG
@@ -18,17 +16,39 @@
     "incumple" (default): solo incumplimientos
     "cumple": solo cumplimientos
     "todos": todos los recursos evaluados
+
 .EXAMPLE
-    ./Check-SubscriptionPolicyCompliance.ps1 -SubscriptionId <id> -SourceMG <origen> -TargetMG <destino> -Mode incumple
+
+    ./Check-SubscriptionPolicyCompliance.ps1 -SubscriptionId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" -SourceMG "MG-ORIGEN" -TargetMG "MG-DESTINO" -Mode incumple
+
+.EXAMPLE
+    ./Check-SubscriptionPolicyCompliance.ps1 -SubscriptionId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" -SourceMG "MG-ORIGEN" -TargetMG "MG-DESTINO" -Mode cumple
+
+.EXAMPLE
+    ./Check-SubscriptionPolicyCompliance.ps1 -SubscriptionId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" -SourceMG "MG-ORIGEN" -TargetMG "MG-DESTINO" -Mode todos
+
+.NOTES
+    Si algún parámetro no se indica, el script lo solicitará de forma interactiva.
+    Requiere permisos para consultar políticas y recursos en Azure.
+
+.LINK
+    https://github.com/rfernandezdo/infra-cloud-helpers
 #>
 
+
+[CmdletBinding()]
 param(
+    [Parameter(Mandatory=$false, HelpMessage="ID de la suscripción a mover")]
     [string]$SubscriptionId,
+    [Parameter(Mandatory=$false, HelpMessage="Management group origen")]
     [string]$SourceMG,
+    [Parameter(Mandatory=$false, HelpMessage="Management group destino")]
     [string]$TargetMG,
+    [Parameter(Mandatory=$false, HelpMessage="Modo de salida: incumple, cumple, todos")]
     [ValidateSet("incumple", "cumple", "todos")]
     [string]$Mode = "incumple"
 )
+
 
 function PromptIfMissing {
     param(
@@ -40,6 +60,18 @@ function PromptIfMissing {
         return Read-Host
     }
     return $Value
+}
+
+# Comprobación e instalación de Az.Resources si no está presente
+if (-not (Get-Module -ListAvailable -Name Az.Resources)) {
+    Write-Host "El módulo Az.Resources no está instalado. Instalando..." -ForegroundColor Cyan
+    try {
+        Install-Module -Name Az.Resources -Scope CurrentUser -Force -ErrorAction Stop
+        Write-Host "Módulo Az.Resources instalado correctamente." -ForegroundColor Green
+    } catch {
+        Write-Error "No se pudo instalar el módulo Az.Resources. Ejecute PowerShell como administrador o instale manualmente."
+        exit 1
+    }
 }
 
 $SubscriptionId = PromptIfMissing $SubscriptionId "Introduce el ID de la suscripción:"
@@ -56,7 +88,8 @@ if (-not (Get-AzContext)) {
 Set-AzContext -SubscriptionId $SubscriptionId | Out-Null
 
 # Obtiene las asignaciones de políticas en el management group destino
-$policyAssignments = Get-AzPolicyAssignment -ManagementGroupName $TargetMG
+$mgScope = "/providers/Microsoft.Management/managementGroups/$TargetMG"
+$policyAssignments = Get-AzPolicyAssignment -Scope $mgScope
 
 # Filtra solo las policies/iniciativas con efecto Deny
 $denyAssignments = $policyAssignments | Where-Object {

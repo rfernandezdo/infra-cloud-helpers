@@ -134,7 +134,8 @@ if (-not (Get-AzContext)) {
 Set-AzContext -SubscriptionId $SubscriptionId | Out-Null
 
 # Obtiene las asignaciones de políticas en el management group destino (simulación de herencia)
-Write-Host "Obteniendo asignaciones de políticas del management group destino y superiores..." -ForegroundColor Cyan
+Write-Host "`n=== FASE 1: OBTENIENDO ASIGNACIONES DE POLÍTICAS ===" -ForegroundColor Cyan
+Write-Host "Buscando asignaciones en management group destino y superiores..." -ForegroundColor Cyan
 
 # Función para obtener todas las asignaciones heredadas (del MG destino y sus ancestros)
 function Get-InheritedPolicyAssignments {
@@ -142,14 +143,21 @@ function Get-InheritedPolicyAssignments {
     
     $allAssignments = @()
     $currentMG = $ManagementGroupName
+    $level = 0
     
     # Recorre la jerarquía hacia arriba para obtener todas las políticas heredadas
     while ($currentMG) {
+        $level++
+        Write-Host "  [$level] Consultando management group: $currentMG..." -ForegroundColor Gray
+        
         $mgScope = "/providers/Microsoft.Management/managementGroups/$currentMG"
         $assignments = Get-AzPolicyAssignment -Scope $mgScope -ErrorAction SilentlyContinue
         
         if ($assignments) {
+            Write-Host "      ✓ Encontradas $($assignments.Count) asignaciones" -ForegroundColor Green
             $allAssignments += $assignments
+        } else {
+            Write-Host "      - Sin asignaciones directas" -ForegroundColor Gray
         }
         
         # Obtiene el management group padre
@@ -157,6 +165,7 @@ function Get-InheritedPolicyAssignments {
         if ($mgInfo.ParentId) {
             $currentMG = $mgInfo.ParentId.Split('/')[-1]
         } else {
+            Write-Host "      - Alcanzado el management group raíz" -ForegroundColor Gray
             $currentMG = $null
         }
     }
@@ -166,6 +175,8 @@ function Get-InheritedPolicyAssignments {
 
 $policyAssignments = Get-InheritedPolicyAssignments -ManagementGroupName $TargetMG
 
+Write-Host "`nTotal de asignaciones encontradas: $($policyAssignments.Count)" -ForegroundColor Cyan
+
 if (-not $policyAssignments -or $policyAssignments.Count -eq 0) {
     Write-Host "No se encontraron asignaciones de políticas en el management group destino." -ForegroundColor Yellow
     exit 0
@@ -174,10 +185,10 @@ if (-not $policyAssignments -or $policyAssignments.Count -eq 0) {
 Write-Host "Asignaciones encontradas (incluyendo heredadas): $($policyAssignments.Count)" -ForegroundColor Cyan
 
 # Procesa todas las políticas e iniciativas (cualquier efecto)
+Write-Host "`n=== FASE 2: ANALIZANDO DEFINICIONES DE POLÍTICAS ===" -ForegroundColor Cyan
 $allPolicies = @()
 $processedDefs = @{}
-
-Write-Host "Analizando definiciones de políticas e iniciativas..." -ForegroundColor Cyan
+$processedCount = 0
 
 foreach ($assignment in $policyAssignments) {
     if (-not $assignment -or -not $assignment.Properties) {
@@ -189,6 +200,11 @@ foreach ($assignment in $policyAssignments) {
     # Valida que el ID no esté vacío
     if ([string]::IsNullOrWhiteSpace($policyDefId)) {
         continue
+    }
+    
+    $assignmentName = $assignment.Properties.DisplayName
+    if ([string]::IsNullOrWhiteSpace($assignmentName)) {
+        $assignmentName = $assignment.Name
     }
     
     # Evita procesar la misma definición múltiples veces
@@ -203,18 +219,26 @@ foreach ($assignment in $policyAssignments) {
         continue
     }
     
+    $processedCount++
+    Write-Host "  [$processedCount/$($policyAssignments.Count)] Procesando: $assignmentName" -ForegroundColor Gray
+    
     # Obtiene la definición de la política o iniciativa
     if ($policyDefId -match "/policySetDefinitions/") {
         # Es una iniciativa
+        Write-Host "      Tipo: Iniciativa" -ForegroundColor Cyan
         $policyDef = Get-AzPolicySetDefinition -Id $policyDefId -ErrorAction SilentlyContinue
         if ($policyDef -and $policyDef.Properties -and $policyDef.Properties.PolicyDefinitions) {
+            Write-Host "      Contiene $($policyDef.Properties.PolicyDefinitions.Count) políticas" -ForegroundColor Gray
+            
             # Obtiene todas las políticas de la iniciativa
             $innerPolicies = @()
+            $innerCount = 0
             foreach ($policyRef in $policyDef.Properties.PolicyDefinitions) {
                 if (-not $policyRef.policyDefinitionId) {
                     continue
                 }
                 
+                $innerCount++
                 $innerPolicy = Get-AzPolicyDefinition -Id $policyRef.policyDefinitionId -ErrorAction SilentlyContinue
                 if ($innerPolicy -and $innerPolicy.Properties -and $innerPolicy.Properties.PolicyRule) {
                     # Agrega la política con sus parámetros de la iniciativa
@@ -222,7 +246,21 @@ foreach ($assignment in $policyAssignments) {
                         Definition = $innerPolicy
                         Parameters = $policyRef.parameters
                     }
+                    
+                    # Obtiene el efecto
+                    $effect = $innerPolicy.Properties.PolicyRule.then.effect
+                    if ($effect -like "[parameters(*)]" -and $policyRef.parameters) {
+                        $effect = "Parametrizado"
+                    }
+                    
+                    if ($innerCount -le 3) {
+                        Write-Host "        ├─ $($innerPolicy.Properties.DisplayName) (Efecto: $effect)" -ForegroundColor DarkGray
+                    }
                 }
+            }
+            
+            if ($innerCount -gt 3) {
+                Write-Host "        └─ ... y $(($innerCount - 3)) más" -ForegroundColor DarkGray
             }
             
             if ($innerPolicies.Count -gt 0) {
@@ -232,48 +270,80 @@ foreach ($assignment in $policyAssignments) {
                     Definition = $innerPolicies
                     IsInitiative = $true
                 }
+                Write-Host "      ✓ Iniciativa procesada correctamente" -ForegroundColor Green
             } else {
                 $processedDefs[$policyDefId] = $null
+                Write-Host "      ⚠ No se pudieron cargar las políticas de la iniciativa" -ForegroundColor Yellow
             }
         } else {
             $processedDefs[$policyDefId] = $null
+            Write-Host "      ⚠ No se pudo obtener la definición de la iniciativa" -ForegroundColor Yellow
         }
     } else {
         # Es una política individual
+        Write-Host "      Tipo: Política individual" -ForegroundColor Cyan
         $policyDef = Get-AzPolicyDefinition -Id $policyDefId -ErrorAction SilentlyContinue
         if ($policyDef -and $policyDef.Properties -and $policyDef.Properties.PolicyRule) {
+            $effect = $policyDef.Properties.PolicyRule.then.effect
+            if ($effect -like "[parameters(*)]") {
+                $effect = "Parametrizado"
+            }
+            Write-Host "      Efecto: $effect" -ForegroundColor Gray
+            
             $processedDefs[$policyDefId] = $policyDef
             $allPolicies += @{
                 Assignment = $assignment
                 Definition = $policyDef
                 IsInitiative = $false
             }
+            Write-Host "      ✓ Política procesada correctamente" -ForegroundColor Green
         } else {
             $processedDefs[$policyDefId] = $null
+            Write-Host "      ⚠ No se pudo obtener la definición de la política" -ForegroundColor Yellow
         }
     }
 }
 
+Write-Host "`n📊 Resumen de procesamiento:" -ForegroundColor Cyan
+Write-Host "   - Asignaciones procesadas: $processedCount" -ForegroundColor Gray
+Write-Host "   - Políticas/iniciativas válidas: $($allPolicies.Count)" -ForegroundColor Gray
+
 if ($allPolicies.Count -eq 0) {
-    Write-Host "No hay políticas/iniciativas en el management group destino." -ForegroundColor Green
+    Write-Host "`n❌ No hay políticas/iniciativas en el management group destino." -ForegroundColor Red
+    Write-Host "   Esto puede indicar que:" -ForegroundColor Yellow
+    Write-Host "   - El management group no tiene políticas asignadas" -ForegroundColor Yellow
+    Write-Host "   - No tienes permisos para leer las definiciones de políticas" -ForegroundColor Yellow
+    Write-Host "   - Hubo un error al obtener las definiciones`n" -ForegroundColor Yellow
     exit 0
 }
 
-Write-Host "Políticas/iniciativas encontradas: $($allPolicies.Count)" -ForegroundColor Cyan
+Write-Host "`n=== FASE 3: OBTENIENDO RECURSOS ===" -ForegroundColor Cyan
 
 # Obtiene los recursos de la suscripción
-Write-Host "Obteniendo recursos de la suscripción..." -ForegroundColor Cyan
+Write-Host "Obteniendo recursos de la suscripción $SubscriptionId..." -ForegroundColor Cyan
 $resources = Get-AzResource -SubscriptionId $SubscriptionId
 
 if (-not $resources -or $resources.Count -eq 0) {
-    Write-Host "No se encontraron recursos en la suscripción." -ForegroundColor Yellow
+    Write-Host "❌ No se encontraron recursos en la suscripción." -ForegroundColor Red
     exit 0
 }
 
-Write-Host "Recursos encontrados: $($resources.Count)" -ForegroundColor Cyan
-Write-Host "`n=== ANÁLISIS DE IMPACTO DE MIGRACIÓN ===" -ForegroundColor Yellow
-Write-Host "Analizando qué políticas Deny del MG destino aplicarían a los recursos..." -ForegroundColor Yellow
-Write-Host "==================================================`n" -ForegroundColor Yellow
+Write-Host "✓ Recursos encontrados: $($resources.Count)" -ForegroundColor Green
+
+# Muestra resumen de tipos de recursos
+$resourceTypes = $resources | Group-Object -Property ResourceType | Sort-Object Count -Descending | Select-Object -First 5
+Write-Host "`n📦 Tipos de recursos más comunes:" -ForegroundColor Cyan
+foreach ($type in $resourceTypes) {
+    Write-Host "   - $($type.Name): $($type.Count) recursos" -ForegroundColor Gray
+}
+if ($resourceTypes.Count -lt ($resources | Group-Object -Property ResourceType).Count) {
+    $remaining = ($resources | Group-Object -Property ResourceType).Count - $resourceTypes.Count
+    Write-Host "   - ... y $remaining tipos más" -ForegroundColor DarkGray
+}
+
+Write-Host "`n=== FASE 4: EVALUANDO CUMPLIMIENTO ===" -ForegroundColor Cyan
+Write-Host "Analizando cumplimiento de recursos contra políticas del MG destino..." -ForegroundColor Cyan
+Write-Host "Este proceso puede tardar varios minutos...`n" -ForegroundColor Yellow
 
 # Función para obtener el valor de una propiedad usando alias de Azure Policy
 function Get-ResourcePropertyByAlias {
@@ -501,12 +571,15 @@ $resultados = @()
 $policyDetails = @()
 $processed = 0
 
+$policyIndex = 0
 foreach ($policyInfo in $allPolicies) {
+    $policyIndex++
     $assignment = $policyInfo.Assignment
     $policyName = $assignment.Properties.DisplayName
     $isInitiative = $policyInfo.IsInitiative
     
-    Write-Host "Evaluando política: $policyName..." -ForegroundColor Gray
+    $policyType = if ($isInitiative) { "Iniciativa" } else { "Política" }
+    Write-Host "[$policyIndex/$($allPolicies.Count)] Evaluando $policyType`: $policyName" -ForegroundColor Cyan
     
     if ($isInitiative) {
         # Para iniciativas, procesa cada política individual con sus parámetros

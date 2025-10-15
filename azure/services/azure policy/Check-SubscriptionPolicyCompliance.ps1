@@ -142,69 +142,59 @@ function Get-InheritedPolicyAssignments {
     param([string]$ManagementGroupName)
     
     $allAssignments = @()
+    $uniqueIds = @{}
     $currentMG = $ManagementGroupName
     $level = 0
     $mgHierarchy = @()
     
     # Primero construye la jerarquía completa
     Write-Host "  Construyendo jerarquía de management groups..." -ForegroundColor Gray
-    while ($currentMG) {
-        $mgHierarchy += $currentMG
-        $mgInfo = Get-AzManagementGroup -GroupId $currentMG -Expand -ErrorAction SilentlyContinue
-        if ($mgInfo.ParentId) {
-            $currentMG = $mgInfo.ParentId.Split('/')[-1]
+    $tempMG = $ManagementGroupName
+    while ($tempMG) {
+        $mgHierarchy += $tempMG
+        $mgInfo = Get-AzManagementGroup -GroupId $tempMG -Expand -ErrorAction SilentlyContinue
+        if ($mgInfo -and $mgInfo.ParentId) {
+            $tempMG = $mgInfo.ParentId.Split('/')[-1]
         } else {
-            $currentMG = $null
+            $tempMG = $null
         }
     }
     
     Write-Host "  Jerarquía: $($mgHierarchy -join ' <- ')`n" -ForegroundColor DarkGray
     
-    # Ahora obtiene las asignaciones de cada nivel
+    # Ahora obtiene las asignaciones de cada nivel (desde el destino hasta la raíz)
     foreach ($mg in $mgHierarchy) {
         $level++
         Write-Host "  [$level/$($mgHierarchy.Count)] Consultando management group: $mg..." -ForegroundColor Gray
         
-        # Obtiene asignaciones directamente en este MG
+        # Obtiene TODAS las asignaciones en este scope
         $mgScope = "/providers/Microsoft.Management/managementGroups/$mg"
-        $directAssignments = Get-AzPolicyAssignment -Scope $mgScope -ErrorAction SilentlyContinue
         
-        # También obtiene todas las asignaciones que aplican a este scope (incluyendo heredadas)
-        $allMgAssignments = Get-AzPolicyAssignment -IncludeDescendent -Scope $mgScope -ErrorAction SilentlyContinue
-        
-        # Combina ambas (eliminando duplicados por ResourceId)
-        $assignments = @()
-        $uniqueIds = @{}
-        
-        foreach ($assignment in ($directAssignments + $allMgAssignments)) {
-            if ($assignment -and $assignment.ResourceId -and -not $uniqueIds.ContainsKey($assignment.ResourceId)) {
-                $assignments += $assignment
-                $uniqueIds[$assignment.ResourceId] = $true
-            }
-        }
-        
-        if ($assignments.Count -gt 0) {
-            Write-Host "      ✓ Encontradas $($assignments.Count) asignaciones (directas + heredadas)" -ForegroundColor Green
+        try {
+            # Intenta obtener asignaciones directas
+            $assignments = @(Get-AzPolicyAssignment -Scope $mgScope -ErrorAction SilentlyContinue)
             
-            # Agrega solo las que no están ya en la lista (por ResourceId)
-            foreach ($assignment in $assignments) {
-                $exists = $false
-                foreach ($existing in $allAssignments) {
-                    if ($existing.ResourceId -eq $assignment.ResourceId) {
-                        $exists = $true
-                        break
+            if ($assignments.Count -gt 0) {
+                Write-Host "      ✓ Encontradas $($assignments.Count) asignaciones directas" -ForegroundColor Green
+                
+                # Agrega solo las que no están ya en la lista (por ResourceId)
+                foreach ($assignment in $assignments) {
+                    if ($assignment -and $assignment.ResourceId) {
+                        if (-not $uniqueIds.ContainsKey($assignment.ResourceId)) {
+                            $allAssignments += $assignment
+                            $uniqueIds[$assignment.ResourceId] = $true
+                        }
                     }
                 }
-                if (-not $exists) {
-                    $allAssignments += $assignment
-                }
+            } else {
+                Write-Host "      - Sin asignaciones directas" -ForegroundColor Gray
             }
-        } else {
-            Write-Host "      - Sin asignaciones" -ForegroundColor Gray
+        } catch {
+            Write-Host "      ⚠ Error al consultar: $($_.Exception.Message)" -ForegroundColor Yellow
         }
     }
     
-    Write-Host "  ✓ Total de asignaciones únicas recopiladas: $($allAssignments.Count)" -ForegroundColor Green
+    Write-Host "`n  ✓ Total de asignaciones únicas recopiladas: $($allAssignments.Count)" -ForegroundColor Green
     
     return $allAssignments
 }

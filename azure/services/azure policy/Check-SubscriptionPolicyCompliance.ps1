@@ -167,15 +167,21 @@ function Get-InheritedPolicyAssignments {
         $level++
         Write-Host "  [$level/$($mgHierarchy.Count)] Consultando management group: $mg..." -ForegroundColor Gray
         
-        # Obtiene TODAS las asignaciones en este scope
+        # Obtiene TODAS las asignaciones visibles y filtra por scope
         $mgScope = "/providers/Microsoft.Management/managementGroups/$mg"
         
         try {
-            # Intenta obtener asignaciones directas
-            $assignments = @(Get-AzPolicyAssignment -Scope $mgScope -ErrorAction SilentlyContinue)
+            # Obtiene todas las asignaciones y filtra las que pertenecen a este MG
+            $allVisible = @(Get-AzPolicyAssignment -ErrorAction SilentlyContinue)
+            Write-Host "      Total de asignaciones visibles: $($allVisible.Count)" -ForegroundColor DarkGray
+            
+            # Filtra por scope de este MG específico
+            $assignments = @($allVisible | Where-Object { 
+                $_.Properties.Scope -eq $mgScope
+            })
             
             if ($assignments.Count -gt 0) {
-                Write-Host "      ✓ Encontradas $($assignments.Count) asignaciones directas" -ForegroundColor Green
+                Write-Host "      ✓ Encontradas $($assignments.Count) asignaciones en este scope" -ForegroundColor Green
                 
                 # Agrega solo las que no están ya en la lista (por ResourceId)
                 foreach ($assignment in $assignments) {
@@ -183,11 +189,12 @@ function Get-InheritedPolicyAssignments {
                         if (-not $uniqueIds.ContainsKey($assignment.ResourceId)) {
                             $allAssignments += $assignment
                             $uniqueIds[$assignment.ResourceId] = $true
+                            Write-Host "        + $($assignment.Properties.DisplayName)" -ForegroundColor DarkGray
                         }
                     }
                 }
             } else {
-                Write-Host "      - Sin asignaciones directas" -ForegroundColor Gray
+                Write-Host "      - Sin asignaciones en este scope" -ForegroundColor Gray
             }
         } catch {
             Write-Host "      ⚠ Error al consultar: $($_.Exception.Message)" -ForegroundColor Yellow

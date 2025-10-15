@@ -144,31 +144,67 @@ function Get-InheritedPolicyAssignments {
     $allAssignments = @()
     $currentMG = $ManagementGroupName
     $level = 0
+    $mgHierarchy = @()
     
-    # Recorre la jerarquía hacia arriba para obtener todas las políticas heredadas
+    # Primero construye la jerarquía completa
+    Write-Host "  Construyendo jerarquía de management groups..." -ForegroundColor Gray
     while ($currentMG) {
-        $level++
-        Write-Host "  [$level] Consultando management group: $currentMG..." -ForegroundColor Gray
-        
-        $mgScope = "/providers/Microsoft.Management/managementGroups/$currentMG"
-        $assignments = Get-AzPolicyAssignment -Scope $mgScope -ErrorAction SilentlyContinue
-        
-        if ($assignments) {
-            Write-Host "      ✓ Encontradas $($assignments.Count) asignaciones" -ForegroundColor Green
-            $allAssignments += $assignments
-        } else {
-            Write-Host "      - Sin asignaciones directas" -ForegroundColor Gray
-        }
-        
-        # Obtiene el management group padre
+        $mgHierarchy += $currentMG
         $mgInfo = Get-AzManagementGroup -GroupId $currentMG -Expand -ErrorAction SilentlyContinue
         if ($mgInfo.ParentId) {
             $currentMG = $mgInfo.ParentId.Split('/')[-1]
         } else {
-            Write-Host "      - Alcanzado el management group raíz" -ForegroundColor Gray
             $currentMG = $null
         }
     }
+    
+    Write-Host "  Jerarquía: $($mgHierarchy -join ' <- ')`n" -ForegroundColor DarkGray
+    
+    # Ahora obtiene las asignaciones de cada nivel
+    foreach ($mg in $mgHierarchy) {
+        $level++
+        Write-Host "  [$level/$($mgHierarchy.Count)] Consultando management group: $mg..." -ForegroundColor Gray
+        
+        # Obtiene asignaciones directamente en este MG
+        $mgScope = "/providers/Microsoft.Management/managementGroups/$mg"
+        $directAssignments = Get-AzPolicyAssignment -Scope $mgScope -ErrorAction SilentlyContinue
+        
+        # También obtiene todas las asignaciones que aplican a este scope (incluyendo heredadas)
+        $allMgAssignments = Get-AzPolicyAssignment -IncludeDescendent -Scope $mgScope -ErrorAction SilentlyContinue
+        
+        # Combina ambas (eliminando duplicados por ResourceId)
+        $assignments = @()
+        $uniqueIds = @{}
+        
+        foreach ($assignment in ($directAssignments + $allMgAssignments)) {
+            if ($assignment -and $assignment.ResourceId -and -not $uniqueIds.ContainsKey($assignment.ResourceId)) {
+                $assignments += $assignment
+                $uniqueIds[$assignment.ResourceId] = $true
+            }
+        }
+        
+        if ($assignments.Count -gt 0) {
+            Write-Host "      ✓ Encontradas $($assignments.Count) asignaciones (directas + heredadas)" -ForegroundColor Green
+            
+            # Agrega solo las que no están ya en la lista (por ResourceId)
+            foreach ($assignment in $assignments) {
+                $exists = $false
+                foreach ($existing in $allAssignments) {
+                    if ($existing.ResourceId -eq $assignment.ResourceId) {
+                        $exists = $true
+                        break
+                    }
+                }
+                if (-not $exists) {
+                    $allAssignments += $assignment
+                }
+            }
+        } else {
+            Write-Host "      - Sin asignaciones" -ForegroundColor Gray
+        }
+    }
+    
+    Write-Host "  ✓ Total de asignaciones únicas recopiladas: $($allAssignments.Count)" -ForegroundColor Green
     
     return $allAssignments
 }

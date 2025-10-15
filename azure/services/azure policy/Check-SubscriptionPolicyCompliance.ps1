@@ -87,50 +87,191 @@ if (-not (Get-AzContext)) {
 # Selecciona la suscripción
 Set-AzContext -SubscriptionId $SubscriptionId | Out-Null
 
-# Obtiene las asignaciones de políticas en el management group destino
-$mgScope = "/providers/Microsoft.Management/managementGroups/$TargetMG"
-$policyAssignments = Get-AzPolicyAssignment -Scope $mgScope
+# Obtiene las asignaciones de políticas en el management group destino (simulación de herencia)
+Write-Host "Obteniendo asignaciones de políticas del management group destino y superiores..." -ForegroundColor Cyan
 
-# Filtra solo las policies/iniciativas con efecto Deny
-$denyAssignments = $policyAssignments | Where-Object {
-    $_.PolicyDefinition -and (
-        ($_.PolicyDefinition.Properties.Effect -eq "Deny") -or
-        ($_.PolicyDefinition.Properties.Effects -contains "Deny")
-    )
+# Función para obtener todas las asignaciones heredadas (del MG destino y sus ancestros)
+function Get-InheritedPolicyAssignments {
+    param([string]$ManagementGroupName)
+    
+    $allAssignments = @()
+    $currentMG = $ManagementGroupName
+    
+    # Recorre la jerarquía hacia arriba para obtener todas las políticas heredadas
+    while ($currentMG) {
+        $mgScope = "/providers/Microsoft.Management/managementGroups/$currentMG"
+        $assignments = Get-AzPolicyAssignment -Scope $mgScope -ErrorAction SilentlyContinue
+        
+        if ($assignments) {
+            $allAssignments += $assignments
+        }
+        
+        # Obtiene el management group padre
+        $mgInfo = Get-AzManagementGroup -GroupId $currentMG -Expand -ErrorAction SilentlyContinue
+        if ($mgInfo.ParentId) {
+            $currentMG = $mgInfo.ParentId.Split('/')[-1]
+        } else {
+            $currentMG = $null
+        }
+    }
+    
+    return $allAssignments
 }
 
-if (-not $denyAssignments) {
-    Write-Host "No hay políticas/iniciativas con efecto Deny en el management group destino." -ForegroundColor Green
+$policyAssignments = Get-InheritedPolicyAssignments -ManagementGroupName $TargetMG
+
+if (-not $policyAssignments -or $policyAssignments.Count -eq 0) {
+    Write-Host "No se encontraron asignaciones de políticas en el management group destino." -ForegroundColor Yellow
     exit 0
 }
 
-# Obtiene los recursos de la suscripción
-$resources = Get-AzResource -SubscriptionId $SubscriptionId
+Write-Host "Asignaciones encontradas (incluyendo heredadas): $($policyAssignments.Count)" -ForegroundColor Cyan
 
-# Evalúa el cumplimiento de cada recurso respecto a cada policy/iniciativa Deny
-$resultados = @()
-foreach ($resource in $resources) {
-    foreach ($assignment in $denyAssignments) {
-        $compliance = Get-AzPolicyState -SubscriptionId $SubscriptionId -PolicyAssignmentName $assignment.Name -ResourceId $resource.ResourceId
-        if ($compliance) {
-            $incumple = $compliance.ComplianceState -eq "NonCompliant"
-            $cumple   = $compliance.ComplianceState -eq "Compliant"
-            if (($Mode -eq "incumple" -and $incumple) -or
-                ($Mode -eq "cumple"   -and $cumple)   -or
-                ($Mode -eq "todos")) {
-                $resultados += [PSCustomObject]@{
-                    ResourceName = $resource.Name
-                    ResourceType = $resource.ResourceType
-                    PolicyOrInitiative = $assignment.DisplayName
-                    ComplianceState = $compliance.ComplianceState
+# Filtra solo las policies con efecto Deny y construye información detallada
+$denyPolicies = @()
+$processedDefs = @{}
+
+Write-Host "Analizando definiciones de políticas para identificar efecto Deny..." -ForegroundColor Cyan
+
+foreach ($assignment in $policyAssignments) {
+    $policyDefId = $assignment.Properties.PolicyDefinitionId
+    
+    # Evita procesar la misma definición múltiples veces
+    if ($processedDefs.ContainsKey($policyDefId)) {
+        if ($processedDefs[$policyDefId]) {
+            $denyPolicies += @{
+                Assignment = $assignment
+                Definition = $processedDefs[$policyDefId]
+                IsInitiative = $policyDefId -match "/policySetDefinitions/"
+            }
+        }
+        continue
+    }
+    
+    # Obtiene la definición de la política o iniciativa
+    if ($policyDefId -match "/policySetDefinitions/") {
+        # Es una iniciativa
+        $policyDef = Get-AzPolicySetDefinition -Id $policyDefId -ErrorAction SilentlyContinue
+        if ($policyDef) {
+            # Verifica si alguna de las políticas de la iniciativa tiene efecto Deny
+            $denyPolicyDefs = @()
+            foreach ($policyRef in $policyDef.Properties.PolicyDefinitions) {
+                $innerPolicy = Get-AzPolicyDefinition -Id $policyRef.policyDefinitionId -ErrorAction SilentlyContinue
+                if ($innerPolicy) {
+                    $effect = $innerPolicy.Properties.PolicyRule.then.effect
+                    # Verifica si el efecto es Deny directamente o si es parametrizado
+                    if ($effect -eq "Deny" -or ($effect -like "[parameters(*)]" -and $policyRef.parameters.effect.value -eq "Deny")) {
+                        $denyPolicyDefs += $innerPolicy
+                    }
                 }
+            }
+            
+            if ($denyPolicyDefs.Count -gt 0) {
+                $processedDefs[$policyDefId] = $denyPolicyDefs
+                $denyPolicies += @{
+                    Assignment = $assignment
+                    Definition = $denyPolicyDefs
+                    IsInitiative = $true
+                }
+            } else {
+                $processedDefs[$policyDefId] = $null
+            }
+        }
+    } else {
+        # Es una política individual
+        $policyDef = Get-AzPolicyDefinition -Id $policyDefId -ErrorAction SilentlyContinue
+        if ($policyDef) {
+            $effect = $policyDef.Properties.PolicyRule.then.effect
+            # Verifica efecto Deny directo o parametrizado
+            if ($effect -eq "Deny" -or ($effect -like "[parameters(*)]" -and $assignment.Properties.Parameters.effect.value -eq "Deny")) {
+                $processedDefs[$policyDefId] = $policyDef
+                $denyPolicies += @{
+                    Assignment = $assignment
+                    Definition = $policyDef
+                    IsInitiative = $false
+                }
+            } else {
+                $processedDefs[$policyDefId] = $null
             }
         }
     }
 }
 
+if ($denyPolicies.Count -eq 0) {
+    Write-Host "No hay políticas/iniciativas con efecto Deny en el management group destino." -ForegroundColor Green
+    exit 0
+}
+
+Write-Host "Políticas/iniciativas con efecto Deny encontradas: $($denyPolicies.Count)" -ForegroundColor Cyan
+
+# Obtiene los recursos de la suscripción
+Write-Host "Obteniendo recursos de la suscripción..." -ForegroundColor Cyan
+$resources = Get-AzResource -SubscriptionId $SubscriptionId
+
+if (-not $resources -or $resources.Count -eq 0) {
+    Write-Host "No se encontraron recursos en la suscripción." -ForegroundColor Yellow
+    exit 0
+}
+
+Write-Host "Recursos encontrados: $($resources.Count)" -ForegroundColor Cyan
+Write-Host "`n=== SIMULACIÓN DE IMPACTO ===" -ForegroundColor Yellow
+Write-Host "NOTA: Esta es una evaluación simulada basada en las políticas del MG destino." -ForegroundColor Yellow
+Write-Host "      Los recursos listados PODRÍAN ser bloqueados o requerir corrección." -ForegroundColor Yellow
+Write-Host "=================================`n" -ForegroundColor Yellow
+
+# Simula el impacto: muestra todos los recursos y las políticas Deny que se les aplicarían
+$resultados = @()
+
+foreach ($resource in $resources) {
+    foreach ($policyInfo in $denyPolicies) {
+        $assignment = $policyInfo.Assignment
+        $policyName = $assignment.Properties.DisplayName
+        
+        # Para simulación, mostramos todos los recursos que estarían sujetos a cada política Deny
+        if ($Mode -eq "todos") {
+            $resultados += [PSCustomObject]@{
+                ResourceName = $resource.Name
+                ResourceType = $resource.ResourceType
+                ResourceLocation = $resource.Location
+                PolicyOrInitiative = $policyName
+                PolicyScope = $assignment.Properties.Scope
+                ImpactoSimulado = "Estaría sujeto a esta política Deny"
+            }
+        } elseif ($Mode -eq "incumple") {
+            # En modo incumple, mostramos recursos potencialmente en riesgo
+            # (sin evaluación real, mostramos todos como posibles incumplimientos)
+            $resultados += [PSCustomObject]@{
+                ResourceName = $resource.Name
+                ResourceType = $resource.ResourceType
+                ResourceLocation = $resource.Location
+                PolicyOrInitiative = $policyName
+                PolicyScope = $assignment.Properties.Scope
+                ImpactoSimulado = "⚠️  POSIBLE INCUMPLIMIENTO - Revisar manualmente"
+            }
+        }
+    }
+}
+
+Write-Host "Análisis completado.`n" -ForegroundColor Cyan
+
 if ($resultados.Count -eq 0) {
-    Write-Host "No se encontraron incumplimientos de políticas Deny para los recursos de la suscripción." -ForegroundColor Green
+    Write-Host "✓ No hay políticas Deny en el management group destino que afecten a esta suscripción." -ForegroundColor Green
 } else {
-    $resultados | Format-Table -AutoSize
+    Write-Host "⚠️  RECURSOS QUE SERÁN IMPACTADOS POR POLÍTICAS DENY:" -ForegroundColor Yellow
+    Write-Host "   Total de combinaciones recurso-política: $($resultados.Count)`n" -ForegroundColor Yellow
+    
+    # Agrupa por política para mejor visualización
+    $groupedByPolicy = $resultados | Group-Object -Property PolicyOrInitiative
+    
+    foreach ($group in $groupedByPolicy) {
+        Write-Host "`n📋 Política: $($group.Name)" -ForegroundColor Cyan
+        Write-Host "   Recursos afectados: $($group.Count)" -ForegroundColor Cyan
+        $group.Group | Select-Object ResourceName, ResourceType, ResourceLocation | Format-Table -AutoSize
+    }
+    
+    Write-Host "`n⚠️  RECOMENDACIONES:" -ForegroundColor Yellow
+    Write-Host "   1. Revise manualmente cada recurso contra las reglas de política específicas" -ForegroundColor Yellow
+    Write-Host "   2. Use 'Get-AzPolicyDefinition' para ver los detalles de cada política" -ForegroundColor Yellow
+    Write-Host "   3. Considere crear excepciones si es necesario antes de mover la suscripción" -ForegroundColor Yellow
+    Write-Host "   4. Pruebe en un entorno de desarrollo/test primero si es posible`n" -ForegroundColor Yellow
 }

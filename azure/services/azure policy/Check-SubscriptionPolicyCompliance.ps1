@@ -173,11 +173,11 @@ if (-not $policyAssignments -or $policyAssignments.Count -eq 0) {
 
 Write-Host "Asignaciones encontradas (incluyendo heredadas): $($policyAssignments.Count)" -ForegroundColor Cyan
 
-# Filtra solo las policies con efecto Deny y construye información detallada
-$denyPolicies = @()
+# Procesa todas las políticas e iniciativas (cualquier efecto)
+$allPolicies = @()
 $processedDefs = @{}
 
-Write-Host "Analizando definiciones de políticas para identificar efecto Deny..." -ForegroundColor Cyan
+Write-Host "Analizando definiciones de políticas e iniciativas..." -ForegroundColor Cyan
 
 foreach ($assignment in $policyAssignments) {
     if (-not $assignment -or -not $assignment.Properties) {
@@ -194,7 +194,7 @@ foreach ($assignment in $policyAssignments) {
     # Evita procesar la misma definición múltiples veces
     if ($processedDefs.ContainsKey($policyDefId)) {
         if ($processedDefs[$policyDefId]) {
-            $denyPolicies += @{
+            $allPolicies += @{
                 Assignment = $assignment
                 Definition = $processedDefs[$policyDefId]
                 IsInitiative = $policyDefId -match "/policySetDefinitions/"
@@ -208,8 +208,8 @@ foreach ($assignment in $policyAssignments) {
         # Es una iniciativa
         $policyDef = Get-AzPolicySetDefinition -Id $policyDefId -ErrorAction SilentlyContinue
         if ($policyDef -and $policyDef.Properties -and $policyDef.Properties.PolicyDefinitions) {
-            # Verifica si alguna de las políticas de la iniciativa tiene efecto Deny
-            $denyPolicyDefs = @()
+            # Obtiene todas las políticas de la iniciativa
+            $innerPolicies = @()
             foreach ($policyRef in $policyDef.Properties.PolicyDefinitions) {
                 if (-not $policyRef.policyDefinitionId) {
                     continue
@@ -217,23 +217,19 @@ foreach ($assignment in $policyAssignments) {
                 
                 $innerPolicy = Get-AzPolicyDefinition -Id $policyRef.policyDefinitionId -ErrorAction SilentlyContinue
                 if ($innerPolicy -and $innerPolicy.Properties -and $innerPolicy.Properties.PolicyRule) {
-                    $effect = $innerPolicy.Properties.PolicyRule.then.effect
-                    # Verifica si el efecto es Deny directamente o si es parametrizado
-                    if ($effect -eq "Deny" -or 
-                        ($effect -like "[parameters(*)]" -and 
-                         $policyRef.parameters -and 
-                         $policyRef.parameters.effect -and 
-                         $policyRef.parameters.effect.value -eq "Deny")) {
-                        $denyPolicyDefs += $innerPolicy
+                    # Agrega la política con sus parámetros de la iniciativa
+                    $innerPolicies += @{
+                        Definition = $innerPolicy
+                        Parameters = $policyRef.parameters
                     }
                 }
             }
             
-            if ($denyPolicyDefs.Count -gt 0) {
-                $processedDefs[$policyDefId] = $denyPolicyDefs
-                $denyPolicies += @{
+            if ($innerPolicies.Count -gt 0) {
+                $processedDefs[$policyDefId] = $innerPolicies
+                $allPolicies += @{
                     Assignment = $assignment
-                    Definition = $denyPolicyDefs
+                    Definition = $innerPolicies
                     IsInitiative = $true
                 }
             } else {
@@ -246,27 +242,11 @@ foreach ($assignment in $policyAssignments) {
         # Es una política individual
         $policyDef = Get-AzPolicyDefinition -Id $policyDefId -ErrorAction SilentlyContinue
         if ($policyDef -and $policyDef.Properties -and $policyDef.Properties.PolicyRule) {
-            $effect = $policyDef.Properties.PolicyRule.then.effect
-            # Verifica efecto Deny directo o parametrizado
-            $isDeny = $false
-            if ($effect -eq "Deny") {
-                $isDeny = $true
-            } elseif ($effect -like "[parameters(*)]" -and 
-                      $assignment.Properties.Parameters -and 
-                      $assignment.Properties.Parameters.effect -and 
-                      $assignment.Properties.Parameters.effect.value -eq "Deny") {
-                $isDeny = $true
-            }
-            
-            if ($isDeny) {
-                $processedDefs[$policyDefId] = $policyDef
-                $denyPolicies += @{
-                    Assignment = $assignment
-                    Definition = $policyDef
-                    IsInitiative = $false
-                }
-            } else {
-                $processedDefs[$policyDefId] = $null
+            $processedDefs[$policyDefId] = $policyDef
+            $allPolicies += @{
+                Assignment = $assignment
+                Definition = $policyDef
+                IsInitiative = $false
             }
         } else {
             $processedDefs[$policyDefId] = $null
@@ -274,12 +254,12 @@ foreach ($assignment in $policyAssignments) {
     }
 }
 
-if ($denyPolicies.Count -eq 0) {
-    Write-Host "No hay políticas/iniciativas con efecto Deny en el management group destino." -ForegroundColor Green
+if ($allPolicies.Count -eq 0) {
+    Write-Host "No hay políticas/iniciativas en el management group destino." -ForegroundColor Green
     exit 0
 }
 
-Write-Host "Políticas/iniciativas con efecto Deny encontradas: $($denyPolicies.Count)" -ForegroundColor Cyan
+Write-Host "Políticas/iniciativas encontradas: $($allPolicies.Count)" -ForegroundColor Cyan
 
 # Obtiene los recursos de la suscripción
 Write-Host "Obteniendo recursos de la suscripción..." -ForegroundColor Cyan
@@ -472,40 +452,48 @@ function Test-PolicyCondition {
     return $false
 }
 
-# Función para evaluar si un recurso INCUMPLE una política Deny
+# Función para evaluar si un recurso INCUMPLE una política
 function Test-ResourceViolatesPolicy {
     param(
         $PolicyDefinition,
         $Resource,
-        $Assignment
+        $Assignment,
+        $PolicyParameters = $null
     )
     
     if (-not $PolicyDefinition.Properties.PolicyRule) {
-        return $false
+        return @{ Violates = $false; Effect = "Unknown" }
     }
     
     $policyRule = $PolicyDefinition.Properties.PolicyRule
     
-    # Verifica que el efecto sea Deny
+    # Obtiene el efecto de la política
     $effect = $policyRule.then.effect
-    if ($effect -ne "Deny" -and $effect -notlike "[parameters(*)]") {
-        return $false
-    }
+    $effectValue = $effect
     
-    # Si el efecto es parametrizado, verifica el valor del parámetro
+    # Si el efecto es parametrizado, obtiene el valor real
     if ($effect -like "[parameters(*)]" -and $effect -match "parameters\('(.+)'\)") {
         $paramName = $Matches[1]
-        $effectValue = $Assignment.Properties.Parameters.$paramName.value
-        if ($effectValue -ne "Deny") {
-            return $false
+        
+        # Primero intenta obtener el parámetro de los parámetros de iniciativa (PolicyParameters)
+        if ($PolicyParameters -and $PolicyParameters.$paramName -and $PolicyParameters.$paramName.value) {
+            $effectValue = $PolicyParameters.$paramName.value
+        }
+        # Si no, intenta obtenerlo de los parámetros de la asignación
+        elseif ($Assignment.Properties.Parameters -and $Assignment.Properties.Parameters.$paramName -and $Assignment.Properties.Parameters.$paramName.value) {
+            $effectValue = $Assignment.Properties.Parameters.$paramName.value
         }
     }
     
     # Evalúa la condición if de la política
-    # Si la condición es TRUE, significa que el recurso INCUMPLE (sería bloqueado por Deny)
-    $policyParameters = $Assignment.Properties.Parameters
+    # Si la condición es TRUE, significa que el recurso está sujeto a esta política
+    $assignmentParameters = $Assignment.Properties.Parameters
+    $conditionResult = Test-PolicyCondition -Condition $policyRule.if -Resource $Resource -PolicyParameters $assignmentParameters
     
-    return Test-PolicyCondition -Condition $policyRule.if -Resource $Resource -PolicyParameters $policyParameters
+    return @{
+        Violates = $conditionResult
+        Effect = $effectValue
+    }
 }
 
 # Analiza el impacto real evaluando cada recurso contra cada política
@@ -513,7 +501,7 @@ $resultados = @()
 $policyDetails = @()
 $processed = 0
 
-foreach ($policyInfo in $denyPolicies) {
+foreach ($policyInfo in $allPolicies) {
     $assignment = $policyInfo.Assignment
     $policyName = $assignment.Properties.DisplayName
     $isInitiative = $policyInfo.IsInitiative
@@ -521,23 +509,34 @@ foreach ($policyInfo in $denyPolicies) {
     Write-Host "Evaluando política: $policyName..." -ForegroundColor Gray
     
     if ($isInitiative) {
-        # Para iniciativas, procesa cada política individual
-        foreach ($innerPolicy in $policyInfo.Definition) {
+        # Para iniciativas, procesa cada política individual con sus parámetros
+        foreach ($innerPolicyInfo in $policyInfo.Definition) {
+            $innerPolicy = $innerPolicyInfo.Definition
+            $innerParams = $innerPolicyInfo.Parameters
             $violatingResources = @()
             $compliantResources = @()
             
             foreach ($resource in $resources) {
                 $processed++
                 if ($processed % 5 -eq 0) {
-                    Write-Progress -Activity "Evaluando recursos" -Status "Procesando $processed de $($resources.Count * $denyPolicies.Count)" -PercentComplete (($processed / ($resources.Count * $denyPolicies.Count)) * 100)
+                    Write-Progress -Activity "Evaluando recursos" -Status "Procesando $processed de $($resources.Count * $allPolicies.Count)" -PercentComplete (($processed / ($resources.Count * $allPolicies.Count)) * 100)
                 }
                 
-                $violates = Test-ResourceViolatesPolicy -PolicyDefinition $innerPolicy -Resource $resource -Assignment $assignment
+                $result = Test-ResourceViolatesPolicy -PolicyDefinition $innerPolicy -Resource $resource -Assignment $assignment -PolicyParameters $innerParams
                 
-                if ($violates) {
+                if ($result.Violates) {
                     $violatingResources += $resource
                     
                     if ($Mode -eq "incumple" -or $Mode -eq "todos") {
+                        $impacto = switch ($result.Effect) {
+                            "Deny" { "❌ Sería BLOQUEADO" }
+                            "Audit" { "⚠️  Sería marcado como NO CONFORME (solo auditoría)" }
+                            "AuditIfNotExists" { "⚠️  Requiere recursos adicionales (auditoría)" }
+                            "DeployIfNotExists" { "🔧 Se desplegarían recursos automáticamente" }
+                            "Modify" { "🔧 Se modificaría automáticamente" }
+                            default { "⚠️  Efecto: $($result.Effect)" }
+                        }
+                        
                         $resultados += [PSCustomObject]@{
                             ResourceName = $resource.Name
                             ResourceType = $resource.ResourceType
@@ -546,8 +545,9 @@ foreach ($policyInfo in $denyPolicies) {
                             PolicyOrInitiative = $policyName
                             PolicyName = $innerPolicy.Properties.DisplayName
                             PolicyScope = $assignment.Properties.Scope
+                            Effect = $result.Effect
                             Estado = "❌ INCUMPLE"
-                            Impacto = "Sería bloqueado por esta política Deny"
+                            Impacto = $impacto
                         }
                     }
                 } else {
@@ -562,8 +562,9 @@ foreach ($policyInfo in $denyPolicies) {
                             PolicyOrInitiative = $policyName
                             PolicyName = $innerPolicy.Properties.DisplayName
                             PolicyScope = $assignment.Properties.Scope
+                            Effect = $result.Effect
                             Estado = "✓ CUMPLE"
-                            Impacto = "No sería bloqueado"
+                            Impacto = "Cumple con la política"
                         }
                     }
                 }
@@ -573,6 +574,7 @@ foreach ($policyInfo in $denyPolicies) {
                 $policyDetails += [PSCustomObject]@{
                     PolicyAssignment = $policyName
                     PolicyDefinition = $innerPolicy.Properties.DisplayName
+                    Effect = $result.Effect
                     ViolatingCount = $violatingResources.Count
                     CompliantCount = $compliantResources.Count
                     ViolatingTypes = if ($violatingResources.Count -gt 0) { ($violatingResources | Select-Object -ExpandProperty ResourceType -Unique) -join ", " } else { "Ninguno" }
@@ -588,15 +590,24 @@ foreach ($policyInfo in $denyPolicies) {
         foreach ($resource in $resources) {
             $processed++
             if ($processed % 5 -eq 0) {
-                Write-Progress -Activity "Evaluando recursos" -Status "Procesando $processed de $($resources.Count * $denyPolicies.Count)" -PercentComplete (($processed / ($resources.Count * $denyPolicies.Count)) * 100)
+                Write-Progress -Activity "Evaluando recursos" -Status "Procesando $processed de $($resources.Count * $allPolicies.Count)" -PercentComplete (($processed / ($resources.Count * $allPolicies.Count)) * 100)
             }
             
-            $violates = Test-ResourceViolatesPolicy -PolicyDefinition $policyDef -Resource $resource -Assignment $assignment
+            $result = Test-ResourceViolatesPolicy -PolicyDefinition $policyDef -Resource $resource -Assignment $assignment
             
-            if ($violates) {
+            if ($result.Violates) {
                 $violatingResources += $resource
                 
                 if ($Mode -eq "incumple" -or $Mode -eq "todos") {
+                    $impacto = switch ($result.Effect) {
+                        "Deny" { "❌ Sería BLOQUEADO" }
+                        "Audit" { "⚠️  Sería marcado como NO CONFORME (solo auditoría)" }
+                        "AuditIfNotExists" { "⚠️  Requiere recursos adicionales (auditoría)" }
+                        "DeployIfNotExists" { "🔧 Se desplegarían recursos automáticamente" }
+                        "Modify" { "🔧 Se modificaría automáticamente" }
+                        default { "⚠️  Efecto: $($result.Effect)" }
+                    }
+                    
                     $resultados += [PSCustomObject]@{
                         ResourceName = $resource.Name
                         ResourceType = $resource.ResourceType
@@ -605,8 +616,9 @@ foreach ($policyInfo in $denyPolicies) {
                         PolicyOrInitiative = $policyName
                         PolicyName = $policyDef.Properties.DisplayName
                         PolicyScope = $assignment.Properties.Scope
+                        Effect = $result.Effect
                         Estado = "❌ INCUMPLE"
-                        Impacto = "Sería bloqueado por esta política Deny"
+                        Impacto = $impacto
                     }
                 }
             } else {
@@ -621,8 +633,9 @@ foreach ($policyInfo in $denyPolicies) {
                         PolicyOrInitiative = $policyName
                         PolicyName = $policyDef.Properties.DisplayName
                         PolicyScope = $assignment.Properties.Scope
+                        Effect = $result.Effect
                         Estado = "✓ CUMPLE"
-                        Impacto = "No sería bloqueado"
+                        Impacto = "Cumple con la política"
                     }
                 }
             }
@@ -632,6 +645,7 @@ foreach ($policyInfo in $denyPolicies) {
             $policyDetails += [PSCustomObject]@{
                 PolicyAssignment = $policyName
                 PolicyDefinition = $policyDef.Properties.DisplayName
+                Effect = $result.Effect
                 ViolatingCount = $violatingResources.Count
                 CompliantCount = $compliantResources.Count
                 ViolatingTypes = if ($violatingResources.Count -gt 0) { ($violatingResources | Select-Object -ExpandProperty ResourceType -Unique) -join ", " } else { "Ninguno" }
@@ -649,19 +663,19 @@ $totalViolating = ($policyDetails | Measure-Object -Property ViolatingCount -Sum
 $totalCompliant = ($policyDetails | Measure-Object -Property CompliantCount -Sum).Sum
 
 if ($policyDetails.Count -eq 0) {
-    Write-Host "✓ ÉXITO: No se encontraron políticas Deny en el management group destino." -ForegroundColor Green
+    Write-Host "✓ ÉXITO: No se encontraron políticas en el management group destino." -ForegroundColor Green
     Write-Host "  La migración al management group '$TargetMG' debería ser segura.`n" -ForegroundColor Green
 } elseif ($totalViolating -eq 0) {
-    Write-Host "✓ ÉXITO: Todos los recursos CUMPLEN con las políticas Deny del destino." -ForegroundColor Green
+    Write-Host "✓ ÉXITO: Todos los recursos CUMPLEN con las políticas del destino." -ForegroundColor Green
     Write-Host "  La migración al management group '$TargetMG' debería ser segura.`n" -ForegroundColor Green
     Write-Host "📊 Resumen:" -ForegroundColor Cyan
-    Write-Host "   - Políticas Deny evaluadas: $($policyDetails.Count)" -ForegroundColor Gray
+    Write-Host "   - Políticas evaluadas: $($policyDetails.Count)" -ForegroundColor Gray
     Write-Host "   - Recursos que cumplen: $totalCompliant" -ForegroundColor Green
     Write-Host "   - Recursos que incumplen: $totalViolating`n" -ForegroundColor Green
 } else {
-    Write-Host "❌ ATENCIÓN: Se encontraron recursos que INCUMPLEN políticas Deny`n" -ForegroundColor Red
+    Write-Host "❌ ATENCIÓN: Se encontraron recursos que INCUMPLEN políticas`n" -ForegroundColor Red
     Write-Host "📊 Resumen:" -ForegroundColor Cyan
-    Write-Host "   - Políticas Deny evaluadas: $($policyDetails.Count)" -ForegroundColor Gray
+    Write-Host "   - Políticas evaluadas: $($policyDetails.Count)" -ForegroundColor Gray
     Write-Host "   - Recursos que INCUMPLEN: $totalViolating" -ForegroundColor Red
     Write-Host "   - Recursos que cumplen: $totalCompliant`n" -ForegroundColor Green
     

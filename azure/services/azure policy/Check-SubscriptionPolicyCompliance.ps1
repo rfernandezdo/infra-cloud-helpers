@@ -134,7 +134,16 @@ $processedDefs = @{}
 Write-Host "Analizando definiciones de políticas para identificar efecto Deny..." -ForegroundColor Cyan
 
 foreach ($assignment in $policyAssignments) {
+    if (-not $assignment -or -not $assignment.Properties) {
+        continue
+    }
+    
     $policyDefId = $assignment.Properties.PolicyDefinitionId
+    
+    # Valida que el ID no esté vacío
+    if ([string]::IsNullOrWhiteSpace($policyDefId)) {
+        continue
+    }
     
     # Evita procesar la misma definición múltiples veces
     if ($processedDefs.ContainsKey($policyDefId)) {
@@ -152,15 +161,23 @@ foreach ($assignment in $policyAssignments) {
     if ($policyDefId -match "/policySetDefinitions/") {
         # Es una iniciativa
         $policyDef = Get-AzPolicySetDefinition -Id $policyDefId -ErrorAction SilentlyContinue
-        if ($policyDef) {
+        if ($policyDef -and $policyDef.Properties -and $policyDef.Properties.PolicyDefinitions) {
             # Verifica si alguna de las políticas de la iniciativa tiene efecto Deny
             $denyPolicyDefs = @()
             foreach ($policyRef in $policyDef.Properties.PolicyDefinitions) {
+                if (-not $policyRef.policyDefinitionId) {
+                    continue
+                }
+                
                 $innerPolicy = Get-AzPolicyDefinition -Id $policyRef.policyDefinitionId -ErrorAction SilentlyContinue
-                if ($innerPolicy) {
+                if ($innerPolicy -and $innerPolicy.Properties -and $innerPolicy.Properties.PolicyRule) {
                     $effect = $innerPolicy.Properties.PolicyRule.then.effect
                     # Verifica si el efecto es Deny directamente o si es parametrizado
-                    if ($effect -eq "Deny" -or ($effect -like "[parameters(*)]" -and $policyRef.parameters.effect.value -eq "Deny")) {
+                    if ($effect -eq "Deny" -or 
+                        ($effect -like "[parameters(*)]" -and 
+                         $policyRef.parameters -and 
+                         $policyRef.parameters.effect -and 
+                         $policyRef.parameters.effect.value -eq "Deny")) {
                         $denyPolicyDefs += $innerPolicy
                     }
                 }
@@ -176,14 +193,26 @@ foreach ($assignment in $policyAssignments) {
             } else {
                 $processedDefs[$policyDefId] = $null
             }
+        } else {
+            $processedDefs[$policyDefId] = $null
         }
     } else {
         # Es una política individual
         $policyDef = Get-AzPolicyDefinition -Id $policyDefId -ErrorAction SilentlyContinue
-        if ($policyDef) {
+        if ($policyDef -and $policyDef.Properties -and $policyDef.Properties.PolicyRule) {
             $effect = $policyDef.Properties.PolicyRule.then.effect
             # Verifica efecto Deny directo o parametrizado
-            if ($effect -eq "Deny" -or ($effect -like "[parameters(*)]" -and $assignment.Properties.Parameters.effect.value -eq "Deny")) {
+            $isDeny = $false
+            if ($effect -eq "Deny") {
+                $isDeny = $true
+            } elseif ($effect -like "[parameters(*)]" -and 
+                      $assignment.Properties.Parameters -and 
+                      $assignment.Properties.Parameters.effect -and 
+                      $assignment.Properties.Parameters.effect.value -eq "Deny") {
+                $isDeny = $true
+            }
+            
+            if ($isDeny) {
                 $processedDefs[$policyDefId] = $policyDef
                 $denyPolicies += @{
                     Assignment = $assignment
@@ -193,6 +222,8 @@ foreach ($assignment in $policyAssignments) {
             } else {
                 $processedDefs[$policyDefId] = $null
             }
+        } else {
+            $processedDefs[$policyDefId] = $null
         }
     }
 }

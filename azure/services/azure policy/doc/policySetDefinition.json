@@ -1,0 +1,222 @@
+{
+  "id": "https://schema.management.azure.com/schemas/2020-10-01/policySetDefinition.json#",
+  "$schema": "http://json-schema.org/draft-04/schema#",
+  "title": "Policy Set Definition (Initiative)",
+  "description": "This schema defines Azure Policy Set Definition (Initiative), please see https://learn.microsoft.com/en-us/azure/governance/policy/concepts/initiative-definition-structure for more details.",
+  "type": "object",
+  "properties": {
+    "properties": {
+      "type": "object",
+      "properties": {
+        "displayName": {
+          "type": "string",
+          "description": "The display name of the policy set definition"
+        },
+        "policyType": {
+          "type": "string",
+          "enum": ["BuiltIn", "Custom", "NotSpecified"],
+          "description": "The type of policy set definition"
+        },
+        "description": {
+          "type": "string",
+          "description": "The policy set definition description"
+        },
+        "version": {
+          "type": "string",
+          "description": "The version of the policy set definition",
+          "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$"
+        },
+        "metadata": {
+          "type": "object",
+          "description": "The policy set definition metadata",
+          "properties": {
+            "version": {
+              "type": "string",
+              "description": "The version of the policy set definition metadata"
+            },
+            "category": {
+              "type": "string",
+              "description": "The category of the policy set definition"
+            },
+            "preview": {
+              "type": "boolean",
+              "description": "Whether the policy set definition is in preview"
+            },
+            "deprecated": {
+              "type": "boolean",
+              "description": "Whether the policy set definition is deprecated"
+            }
+          },
+          "additionalProperties": true
+        },
+        "parameters": {
+          "type": "object",
+          "description": "The policy set definition parameters",
+          "patternProperties": {
+            "^[a-zA-Z_][a-zA-Z0-9_]*$": {
+              "$ref": "#/definitions/parameter"
+            }
+          },
+          "additionalProperties": false
+        },
+        "policyDefinitions": {
+          "type": "array",
+          "description": "An array of policy definitions included in the policy set",
+          "items": {
+            "$ref": "#/definitions/policyDefinitionReference"
+          },
+          "minItems": 1
+        },
+        "policyDefinitionGroups": {
+          "type": "array",
+          "description": "An array of policy definition groups for organizing policies",
+          "items": {
+            "$ref": "#/definitions/policyDefinitionGroup"
+          }
+        }
+      },
+      "required": ["displayName", "policyDefinitions"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["properties"],
+  "additionalProperties": false,
+  "definitions": {
+    "parameter": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["String", "Array", "Object", "Boolean", "Integer", "Float", "DateTime"],
+          "description": "The type of the parameter"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "description": {
+              "type": "string",
+              "description": "The description of the parameter"
+            },
+            "displayName": {
+              "type": "string",
+              "description": "The display name of the parameter"
+            },
+            "strongType": {
+              "type": "string",
+              "description": "The strong type hint for the parameter",
+              "enum": [
+                "location",
+                "resourceTypes",
+                "storageSkus",
+                "vmSKUs",
+                "existingResourceGroups",
+                "Microsoft.RecoveryServices/vaults/backupPolicies"
+              ]
+            }
+          },
+          "additionalProperties": true
+        },
+        "defaultValue": {
+          "description": "The default value for the parameter"
+        },
+        "allowedValues": {
+          "type": "array",
+          "description": "The allowed values for the parameter",
+          "items": {}
+        }
+      },
+      "required": ["type"],
+      "additionalProperties": false
+    },
+    "policyDefinitionReference": {
+      "type": "object",
+      "properties": {
+        "policyDefinitionId": {
+          "type": "string",
+          "description": "The ID of the policy definition to include"
+        },
+        "policyDefinitionReferenceId": {
+          "type": "string",
+          "description": "A short name for the included policy definition"
+        },
+        "parameters": {
+          "type": "object",
+          "description": "The parameters to pass to the policy definition",
+          "patternProperties": {
+            "^[a-zA-Z_][a-zA-Z0-9_]*$": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array"
+                    },
+                    {
+                      "type": "object"
+                    },
+                    {
+                      "$ref": "https://schema.management.azure.com/schemas/common/definitions.json#/definitions/expression"
+                    }
+                  ]
+                }
+              },
+              "required": ["value"],
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "definitionVersion": {
+          "type": "string",
+          "description": "The version of the policy definition to reference",
+          "pattern": "^(0|[1-9]\\d*)\\.(\\*|0|[1-9]\\d*)\\.(\\*|0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$"
+        },
+        "groupNames": {
+          "type": "array",
+          "description": "The groups the policy definition is a member of",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": ["policyDefinitionId"],
+      "additionalProperties": false
+    },
+    "policyDefinitionGroup": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The short name for the group"
+        },
+        "category": {
+          "type": "string",
+          "description": "The hierarchy the group belongs to"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "The friendly name for the group"
+        },
+        "description": {
+          "type": "string",
+          "description": "A description of what the group covers"
+        },
+        "additionalMetadataId": {
+          "type": "string",
+          "description": "The location of the policyMetadata object that has additional details about the control and compliance domain"
+        }
+      },
+      "required": ["name"],
+      "additionalProperties": false
+    }
+  }
+}

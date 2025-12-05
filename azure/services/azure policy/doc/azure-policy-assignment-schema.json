@@ -1,0 +1,450 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Azure Policy Assignment Structure",
+  "description": "Complete JSON schema for Azure Policy assignment structure based on Microsoft Learn documentation",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "The assignment resource ID",
+      "pattern": "^/subscriptions/[0-9a-f-]+/providers/Microsoft.Authorization/policyAssignments/[a-zA-Z0-9-_]+$"
+    },
+    "type": {
+      "type": "string",
+      "description": "The assignment resource type",
+      "enum": ["Microsoft.Authorization/policyAssignments"]
+    },
+    "name": {
+      "type": "string",
+      "description": "The assignment name",
+      "maxLength": 128
+    },
+    "location": {
+      "type": "string",
+      "description": "Location for system-assigned managed identity deployment. Required when using system-assigned identity. Cannot be 'global'.",
+      "pattern": "^(?!global$)[a-z0-9]+$"
+    },
+    "systemData": {
+      "type": "object",
+      "description": "System metadata for the assignment",
+      "properties": {
+        "createdBy": {
+          "type": "string"
+        },
+        "createdByType": {
+          "type": "string",
+          "enum": ["User", "Application", "ManagedIdentity", "Key"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "lastModifiedBy": {
+          "type": "string"
+        },
+        "lastModifiedByType": {
+          "type": "string",
+          "enum": ["User", "Application", "ManagedIdentity", "Key"]
+        },
+        "lastModifiedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "properties": {
+      "type": "object",
+      "description": "The assignment properties",
+      "required": ["policyDefinitionId"],
+      "properties": {
+        "scope": {
+          "type": "string",
+          "description": "The scope where the assignment applies",
+          "pattern": "^(/subscriptions/[0-9a-f-]+|/providers/Microsoft.Management/managementGroups/[a-zA-Z0-9-_]+)(/resourceGroups/[a-zA-Z0-9-_()]+)?(/providers/[a-zA-Z0-9.-_]+/[a-zA-Z0-9-_/]+)?$"
+        },
+        "policyDefinitionId": {
+          "type": "string",
+          "description": "The ID of the policy definition or initiative definition",
+          "pattern": "^/(subscriptions/[0-9a-f-]+|providers/Microsoft.Management/managementGroups/[a-zA-Z0-9-_]+)/providers/Microsoft.Authorization/(policyDefinitions|policySetDefinitions)/[a-zA-Z0-9-_]+$"
+        },
+        "definitionVersion": {
+          "type": "string",
+          "description": "Version of the policy definition to use. Use wildcards for auto-ingesting updates (e.g., '1.*.*')",
+          "pattern": "^\\d+(\\.\\*|\\.\\d+(\\.*)?)*$"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "The display name of the assignment",
+          "maxLength": 128
+        },
+        "description": {
+          "type": "string",
+          "description": "The description of the assignment",
+          "maxLength": 512
+        },
+        "metadata": {
+          "type": "object",
+          "description": "Metadata about the assignment",
+          "properties": {
+            "assignedBy": {
+              "type": "string",
+              "description": "The friendly name of the security principal that created the assignment",
+              "maxLength": 1024
+            },
+            "createdBy": {
+              "type": "string",
+              "description": "The GUID of the security principal that created the assignment",
+              "pattern": "^[0-9a-f-]+$",
+              "maxLength": 1024
+            },
+            "createdOn": {
+              "type": "string",
+              "description": "The Universal ISO 8601 DateTime format of the assignment creation time",
+              "format": "date-time",
+              "maxLength": 1024
+            },
+            "updatedBy": {
+              "type": "string",
+              "description": "The friendly name of the security principal that updated the assignment",
+              "maxLength": 1024
+            },
+            "updatedOn": {
+              "type": "string",
+              "description": "The Universal ISO 8601 DateTime format of the assignment update time",
+              "format": "date-time",
+              "maxLength": 1024
+            },
+            "parameterScopes": {
+              "type": "object",
+              "description": "Collection of key-value pairs for strongType parameter scopes",
+              "additionalProperties": {
+                "type": "string",
+                "description": "Resource scope for parameter selection",
+                "pattern": "^/subscriptions/[0-9a-f-]+(/resourceGroups/[a-zA-Z0-9-_()]+)?$"
+              }
+            },
+            "evidenceStorages": {
+              "type": "array",
+              "description": "Recommended storage accounts for manual effect attestations",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "displayName": {
+                    "type": "string",
+                    "description": "Display name of the storage account"
+                  },
+                  "evidenceStorageAccountId": {
+                    "type": "string",
+                    "description": "Resource ID of the storage account",
+                    "pattern": "^/subscriptions/[0-9a-f-]+/resourceGroups/[a-zA-Z0-9-_()]+/providers/Microsoft.Storage/storageAccounts/[a-z0-9]+$"
+                  },
+                  "evidenceBlobContainer": {
+                    "type": "string",
+                    "description": "Blob container name for evidence storage"
+                  }
+                },
+                "required": ["displayName", "evidenceStorageAccountId", "evidenceBlobContainer"]
+              }
+            }
+          },
+          "additionalProperties": {
+            "type": ["string", "number", "boolean", "object", "array"],
+            "description": "Custom metadata properties (max 1024 characters each)"
+          }
+        },
+        "enforcementMode": {
+          "type": "string",
+          "description": "The enforcement mode of the assignment",
+          "enum": ["Default", "DoNotEnforce"],
+          "default": "Default"
+        },
+        "notScopes": {
+          "type": "array",
+          "description": "Array of scopes to exclude from the assignment",
+          "items": {
+            "type": "string",
+            "pattern": "^/subscriptions/[0-9a-f-]+(/resourceGroups/[a-zA-Z0-9-_()]+)?(/providers/[a-zA-Z0-9.-_]+/[a-zA-Z0-9-_/]+)?$"
+          }
+        },
+        "nonComplianceMessages": {
+          "type": "array",
+          "description": "Custom messages for non-compliance",
+          "items": {
+            "type": "object",
+            "properties": {
+              "message": {
+                "type": "string",
+                "description": "The non-compliance message"
+              },
+              "policyDefinitionReferenceId": {
+                "type": "string",
+                "description": "Reference ID for specific policy definition in an initiative"
+              }
+            },
+            "required": ["message"]
+          }
+        },
+        "parameters": {
+          "type": "object",
+          "description": "Parameter values for the policy definition",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "value": {
+                "description": "The parameter value",
+                "oneOf": [
+                  { "type": "string" },
+                  { "type": "number" },
+                  { "type": "boolean" },
+                  { "type": "object" },
+                  { "type": "array" }
+                ]
+              }
+            },
+            "required": ["value"]
+          }
+        },
+        "resourceSelectors": {
+          "type": "array",
+          "description": "Resource selectors for gradual rollout (Safe Deployment Practices)",
+          "maxItems": 10,
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Name of the resource selector"
+              },
+              "selectors": {
+                "type": "array",
+                "description": "Array of selector criteria",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "description": "Type of selector",
+                      "enum": ["resourceLocation", "resourceType", "resourceWithoutLocation"]
+                    },
+                    "in": {
+                      "type": "array",
+                      "description": "List of allowed values",
+                      "maxItems": 50,
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "notIn": {
+                      "type": "array",
+                      "description": "List of not-allowed values",
+                      "maxItems": 50,
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": ["kind"],
+                  "not": {
+                    "allOf": [
+                      { "required": ["in"] },
+                      { "required": ["notIn"] }
+                    ]
+                  }
+                }
+              }
+            },
+            "required": ["name"]
+          }
+        },
+        "overrides": {
+          "type": "array",
+          "description": "Override policy effects or versions without changing underlying definitions",
+          "maxItems": 10,
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "description": "Type of override",
+                "enum": ["policyEffect", "policyVersion"]
+              },
+              "value": {
+                "type": "string",
+                "description": "New value for the override"
+              },
+              "selectors": {
+                "type": "array",
+                "description": "Scope selectors for the override",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "description": "Type of selector",
+                      "enum": ["policyDefinitionReferenceId", "resourceLocation"]
+                    },
+                    "in": {
+                      "type": "array",
+                      "description": "List of allowed values",
+                      "maxItems": 50,
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "notIn": {
+                      "type": "array",
+                      "description": "List of not-allowed values",
+                      "maxItems": 50,
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": ["kind"],
+                  "not": {
+                    "allOf": [
+                      { "required": ["in"] },
+                      { "required": ["notIn"] }
+                    ]
+                  }
+                }
+              }
+            },
+            "required": ["kind", "value"]
+          }
+        },
+        "identity": {
+          "type": "object",
+          "description": "Managed identity for deployIfNotExists and modify effects",
+          "properties": {
+            "principalId": {
+              "type": "string",
+              "description": "Principal ID of the identity (read-only for system-assigned)",
+              "pattern": "^[0-9a-f-]+$"
+            },
+            "tenantId": {
+              "type": "string",
+              "description": "Tenant ID of the identity",
+              "pattern": "^[0-9a-f-]+$"
+            },
+            "type": {
+              "type": "string",
+              "description": "Type of managed identity",
+              "enum": ["SystemAssigned", "UserAssigned", "None"]
+            },
+            "identityType": {
+              "type": "string",
+              "description": "Type of managed identity (alternative property name)",
+              "enum": ["SystemAssigned", "UserAssigned", "None"]
+            },
+            "userAssignedIdentities": {
+              "oneOf": [
+                {
+                  "type": "null",
+                  "description": "No user-assigned identities"
+                },
+                {
+                  "type": "object",
+                  "description": "User-assigned identities",
+                  "additionalProperties": {
+                    "type": "object",
+                    "properties": {
+                      "principalId": {
+                        "type": "string",
+                        "description": "Principal ID of the user-assigned identity",
+                        "pattern": "^[0-9a-f-]+$"
+                      },
+                      "clientId": {
+                        "type": "string",
+                        "description": "Client ID of the user-assigned identity",
+                        "pattern": "^[0-9a-f-]+$"
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "required": ["properties"],
+  "additionalProperties": false,
+  "examples": [
+    {
+      "properties": {
+        "displayName": "Enforce resource naming rules",
+        "description": "Force resource names to begin with DeptA and end with -LC",
+        "definitionVersion": "1.*.*",
+        "metadata": {
+          "assignedBy": "Cloud Center of Excellence"
+        },
+        "enforcementMode": "DoNotEnforce",
+        "notScopes": [],
+        "policyDefinitionId": "/subscriptions/{mySubscriptionID}/providers/Microsoft.Authorization/policyDefinitions/ResourceNaming",
+        "nonComplianceMessages": [
+          {
+            "message": "Resource names must start with 'DeptA' and end with '-LC'."
+          }
+        ],
+        "parameters": {
+          "prefix": {
+            "value": "DeptA"
+          },
+          "suffix": {
+            "value": "-LC"
+          }
+        },
+        "identity": {
+          "principalId": "<PrincipalId>",
+          "tenantId": "<TenantId>",
+          "identityType": "SystemAssigned",
+          "userAssignedIdentities": null
+        },
+        "location": "westus",
+        "resourceSelectors": [],
+        "overrides": []
+      }
+    },
+    {
+      "properties": {
+        "policyDefinitionId": "/subscriptions/{subId}/providers/Microsoft.Authorization/policyDefinitions/ResourceLimit",
+        "definitionVersion": "1.1.*",
+        "resourceSelectors": [
+          {
+            "name": "SDPRegions",
+            "selectors": [
+              {
+                "kind": "resourceLocation",
+                "in": [
+                  "eastus",
+                  "westus"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "properties": {
+        "policyDefinitionId": "/subscriptions/{subId}/providers/Microsoft.Authorization/policySetDefinitions/CostManagement",
+        "overrides": [
+          {
+            "kind": "policyEffect",
+            "value": "disabled",
+            "selectors": [
+              {
+                "kind": "policyDefinitionReferenceId",
+                "in": [
+                  "corpVMSizePolicy"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
